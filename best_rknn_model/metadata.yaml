@@ -1,0 +1,27 @@
+description: Ultralytics YOLO11n model trained on /content/drive/MyDrive/Colab Notebooks/Goosebot
+  training/GooseBot.v1i.yolov11/data.yaml
+author: Ultralytics
+date: '2026-03-26T15:17:11.953357'
+version: 8.4.29
+license: AGPL-3.0 License (https://ultralytics.com/license)
+docs: https://docs.ultralytics.com
+stride: 32
+task: detect
+batch: 1
+imgsz:
+- 640
+- 640
+names:
+  0: 'duck'
+  1: 'l_intersection'
+  2: 'mouse'
+  3: 'redline'
+  4: 'stopsign'
+  5: 't_intersection'
+  6: 'whiteline'
+  7: 'yellowline'
+args:
+  batch: 1
+  name: rk3588
+channels: 3
+end2end: false
