@@ -18,10 +18,10 @@ HOST_IP = '0.0.0.0'
 HOST_PORT = 5000
 
 # --- TUNING ---
-ROI_VERTICAL_CUTOFF = 0.65 
-Kp = 0.0006 #kp=0.0007                
-Kd = 0.0009 
-BASE_SPEED = 0.17 #0.08       
+ROI_VERTICAL_CUTOFF = 0.7 #0.65 normal
+Kp = 0.0007 #kp=0.0007                
+Kd = 0.0005 #0.0009 
+BASE_SPEED = 0.12 #0.08       
 LANE_WIDTH_PIXELS = 450 
 
 # STOP SIGN LOGIC
@@ -128,7 +128,7 @@ def robot_control_loop():
             frame = cv2.flip(frame, 1)
 
             # Run inference on the flipped frame - original conf=0.5
-            results = model.predict(source=frame, conf=0.05, imgsz=640, verbose=False)
+            results = model.predict(source=frame, conf=0.4, imgsz=640, verbose=False)
             result = results[0]
             boxes = result.boxes
             
