@@ -97,24 +97,23 @@ def robot_control_loop():
     def stop_all():
         for m in left_motors + right_motors: m.stop()
 
- # 2. Load Model
+    # 2. Load Model
     print("Loading YOLO Model...")
     model = YOLO(MODEL_PATH)
 
-    # 3. Init Camera
+	# 3. Init Camera
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
     if not cap.isOpened():
         raise RuntimeError("Cannot open camera (VideoCapture(0) failed)")
-
     # Warm up camera (discard first few frames)
     for _ in range(5):
         cap.read()
-
+	
     prev_error = 0
     last_stop_time = 0
-
+    
     input("\n--- READY. Press Enter to start ---")
     print("--- ROBOT STARTED ---")
 
@@ -127,7 +126,6 @@ def robot_control_loop():
             # Flip BEFORE YOLO inference (fix mirrored webcam)
             frame = cv2.flip(frame, 1)
 
-            # Run inference on the flipped frame
             # Run inference on the flipped frame - original conf=0.5
             results = model.predict(source=frame, conf=0.4, imgsz=640, verbose=False)
             result = results[0]
