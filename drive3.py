@@ -7,7 +7,7 @@ from flask import Flask, Response, render_template_string
 from adafruit_pca9685 import PCA9685
 from ultralytics import YOLO
 
-# --- CONFIGURATION ---
+# --- CONFIG ---
 MODEL_PATH = 'best_rknn_model'
 CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
@@ -23,16 +23,15 @@ Kd = 0.00054
 BASE_SPEED = 0.15
 LANE_WIDTH_PIXELS = 450 
 
-STOP_THRESHOLD_Y = CAMERA_HEIGHT * 0.8 
-
 MIN_MOTOR_POWER = 0.07  
 MAX_STEER = 0.8
 
-# --- GLOBALS ---
+# --- GLOBAL STATE ---
 output_frame = None
 lock = threading.Lock()
 
-# ✅ EMERGENCY STOP FLAG
+# ✅ THREAD SAFE EMERGENCY STOP SYSTEM
+state_lock = threading.Lock()
 emergency_stop = False
 
 app = Flask(__name__)
@@ -70,21 +69,24 @@ class Motor:
 @app.route('/stop')
 def stop_robot():
     global emergency_stop
-    emergency_stop = True
+    with state_lock:
+        emergency_stop = True
     print("🛑 EMERGENCY STOP TRIGGERED")
     return "STOPPED"
+
 
 @app.route('/start')
 def start_robot():
     global emergency_stop
-    emergency_stop = False
+    with state_lock:
+        emergency_stop = False
     print("🟢 ROBOT STARTED")
     return "STARTED"
 
 
-# --- ROBOT CONTROL LOOP ---
+# --- ROBOT LOOP ---
 def robot_control_loop():
-    global output_frame, lock, emergency_stop
+    global output_frame, lock
 
     try:
         i2c = busio.I2C(board.SCL, board.SDA)
@@ -100,6 +102,7 @@ def robot_control_loop():
 
     def set_drive(fwd, steer):
         steer = max(min(steer, MAX_STEER), -MAX_STEER)
+
         left = fwd + steer
         right = fwd - steer
 
@@ -143,8 +146,11 @@ def robot_control_loop():
 
             frame = cv2.flip(frame, 1)
 
-            # 🛑 EMERGENCY STOP CHECK (safe + non-blocking)
-            if emergency_stop:
+            # ✅ SAFE SNAPSHOT OF STATE (prevents race condition)
+            with state_lock:
+                stop_flag = emergency_stop
+
+            if stop_flag:
                 stop_all()
                 time.sleep(0.05)
                 continue
@@ -167,6 +173,7 @@ def robot_control_loop():
                     continue
 
                 area = w * h
+
                 if cls == 'yellowline' and area > max_y_area:
                     max_y_area = area
                     best_y_x = x
@@ -231,7 +238,7 @@ def index():
     <body style="background:#111;color:white;text-align:center;">
         <h2>Robot Vision</h2>
         <img src="/video_feed" width="640">
-        <p>Use /stop and /start in browser</p>
+        <p>/stop and /start control robot state</p>
     </body>
     </html>
     """)
