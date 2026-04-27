@@ -18,10 +18,10 @@ HOST_IP = '0.0.0.0'
 HOST_PORT = 5000
 
 # --- TUNING ---
-ROI_VERTICAL_CUTOFF = 0.7 #0.65 normal
+ROI_VERTICAL_CUTOFF = 0.67 #0.65 default
 Kp = 0.0007 #kp=0.0007                
-Kd = 0.0005 #0.0009 
-BASE_SPEED = 0.12 #0.08       
+Kd = 0.00054 #0.0009 
+BASE_SPEED = 0.15 #0.08       
 LANE_WIDTH_PIXELS = 450 
 
 # STOP SIGN LOGIC
@@ -101,7 +101,7 @@ def robot_control_loop():
     print("Loading YOLO Model...")
     model = YOLO(MODEL_PATH)
 
-	# 3. Init Camera
+    # 3. Init Camera
     cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
@@ -127,7 +127,7 @@ def robot_control_loop():
             frame = cv2.flip(frame, 1)
 
             # Run inference on the flipped frame - original conf=0.5
-            results = model.predict(source=frame, conf=0.4, imgsz=640, verbose=False)
+            results = model.predict(source=frame, conf=0.40, imgsz=640, verbose=False)
             result = results[0]
             boxes = result.boxes
             
@@ -171,19 +171,6 @@ def robot_control_loop():
             
             # 1. Execute Stop?
             if stop_requested:
-                #print("!!! STOPPING !!!")
-                #stop_all()
-                
-                # Draw STOP text on frame
-                #cv2.putText(annotated_frame, "STOPPING FOR LINE", (50, 240), 
-                            #cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-                
-                # Update global frame before sleeping so browser sees the message
-                #with lock:
-                    #output_frame = annotated_frame.copy()
-                
-                #time.sleep(STOP_DURATION)
-                #last_stop_time = time.time()
                 continue 
 
             # 2. Calculate Target
@@ -299,4 +286,5 @@ if __name__ == "__main__":
     try:
         app.run(host=HOST_IP, port=HOST_PORT, debug=False, threaded=True, use_reloader=False)
     except KeyboardInterrupt:
+        stop_all()
         print("Stopping...")
