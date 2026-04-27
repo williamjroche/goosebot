@@ -13,7 +13,6 @@ CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CENTER_X = CAMERA_WIDTH / 2
 
-# FLASK CONFIG
 HOST_IP = '0.0.0.0'
 HOST_PORT = 5000
 
@@ -24,24 +23,21 @@ Kd = 0.00054
 BASE_SPEED = 0.15
 LANE_WIDTH_PIXELS = 450 
 
-STOP_DURATION = 2.0        
-STOP_COOLDOWN = 5.0        
 STOP_THRESHOLD_Y = CAMERA_HEIGHT * 0.8 
 
 MIN_MOTOR_POWER = 0.07  
 MAX_STEER = 0.8
 
-# --- GLOBAL VARIABLES ---
+# --- GLOBALS ---
 output_frame = None
 lock = threading.Lock()
 
-# 🔴 EMERGENCY STOP FLAG
+# ✅ EMERGENCY STOP FLAG
 emergency_stop = False
 
-# --- FLASK APP ---
 app = Flask(__name__)
 
-# --- Motor Class ---
+# --- MOTOR CLASS ---
 class Motor:
     def __init__(self, pca, in1, in2):
         self.pca = pca
@@ -70,21 +66,26 @@ class Motor:
         self.in2.duty_cycle = 0
 
 
-# --- KEYBOARD STOP LISTENER ---
-def keyboard_stop_listener():
+# --- FLASK CONTROL ENDPOINTS ---
+@app.route('/stop')
+def stop_robot():
     global emergency_stop
-    while True:
-        key = input()
-        if key.strip().lower() == 'x':
-            print("🛑 EMERGENCY STOP TRIGGERED")
-            emergency_stop = True
-            break
+    emergency_stop = True
+    print("🛑 EMERGENCY STOP TRIGGERED")
+    return "STOPPED"
+
+@app.route('/start')
+def start_robot():
+    global emergency_stop
+    emergency_stop = False
+    print("🟢 ROBOT STARTED")
+    return "STARTED"
 
 
 # --- ROBOT CONTROL LOOP ---
 def robot_control_loop():
     global output_frame, lock, emergency_stop
-    
+
     try:
         i2c = busio.I2C(board.SCL, board.SDA)
         pca = PCA9685(i2c)
@@ -92,6 +93,7 @@ def robot_control_loop():
 
         left_motors = [Motor(pca, 0, 1), Motor(pca, 6, 7)]
         right_motors = [Motor(pca, 2, 3), Motor(pca, 4, 5)]
+
     except Exception as e:
         print(f"Hardware Init Error: {e}")
         return
@@ -100,12 +102,16 @@ def robot_control_loop():
         steer = max(min(steer, MAX_STEER), -MAX_STEER)
         left = fwd + steer
         right = fwd - steer
+
         max_val = max(abs(left), abs(right))
         if max_val > 1.0:
             left /= max_val
             right /= max_val
-        for m in left_motors: m.set_speed(left)
-        for m in right_motors: m.set_speed(right)
+
+        for m in left_motors:
+            m.set_speed(left)
+        for m in right_motors:
+            m.set_speed(right)
 
     def stop_all():
         for m in left_motors + right_motors:
@@ -125,7 +131,6 @@ def robot_control_loop():
         cap.read()
 
     prev_error = 0
-    last_stop_time = 0
 
     input("\n--- READY. Press Enter to start ---")
     print("--- ROBOT STARTED ---")
@@ -138,9 +143,10 @@ def robot_control_loop():
 
             frame = cv2.flip(frame, 1)
 
-            # 🛑 EMERGENCY STOP CHECK
+            # 🛑 EMERGENCY STOP CHECK (safe + non-blocking)
             if emergency_stop:
                 stop_all()
+                time.sleep(0.05)
                 continue
 
             results = model.predict(source=frame, conf=0.40, imgsz=640, verbose=False)
@@ -151,18 +157,10 @@ def robot_control_loop():
             best_w_x = None
             max_y_area = 0
             max_w_area = 0
-            stop_requested = False
-
-            current_time = time.time()
 
             for box in boxes:
                 cls = model.names[int(box.cls[0])]
                 x, y, w, h = box.xywh[0].tolist()
-
-                if cls == 'redline':
-                    if y > STOP_THRESHOLD_Y:
-                        if (current_time - last_stop_time) > STOP_COOLDOWN:
-                            stop_requested = True
 
                 cutoff_pixel = CAMERA_HEIGHT * ROI_VERTICAL_CUTOFF
                 if y < cutoff_pixel:
@@ -178,9 +176,6 @@ def robot_control_loop():
 
             annotated_frame = result.plot()
 
-            if stop_requested:
-                continue
-
             if best_y_x is not None and best_w_x is not None:
                 target_x = (best_y_x + best_w_x) / 2
             elif best_y_x is not None:
@@ -193,13 +188,10 @@ def robot_control_loop():
             error = target_x - CENTER_X
             derivative = error - prev_error
             prev_error = error
+
             steering = (error * Kp) + (derivative * Kd)
 
             set_drive(BASE_SPEED, steering)
-
-            debug_y = int(CAMERA_HEIGHT * ROI_VERTICAL_CUTOFF) + 20
-            cv2.circle(annotated_frame, (int(target_x), debug_y), 10, (0, 255, 0), -1)
-            cv2.line(annotated_frame, (int(CENTER_X), 0), (int(CENTER_X), CAMERA_HEIGHT), (255, 255, 255), 1)
 
             with lock:
                 output_frame = annotated_frame.copy()
@@ -211,12 +203,14 @@ def robot_control_loop():
         print("Robot Loop Ended")
 
 
-# --- FLASK STREAM ---
+# --- STREAM ---
 def generate_frames():
     global output_frame, lock
+
     while True:
         with lock:
             if output_frame is None:
+                time.sleep(0.01)
                 continue
 
             (flag, encodedImage) = cv2.imencode(".jpg", output_frame)
@@ -237,6 +231,7 @@ def index():
     <body style="background:#111;color:white;text-align:center;">
         <h2>Robot Vision</h2>
         <img src="/video_feed" width="640">
+        <p>Use /stop and /start in browser</p>
     </body>
     </html>
     """)
@@ -250,10 +245,7 @@ def video_feed():
 
 # --- MAIN ---
 if __name__ == "__main__":
-    # Start keyboard listener
-    threading.Thread(target=keyboard_stop_listener, daemon=True).start()
 
-    # Start robot thread
     threading.Thread(target=robot_control_loop, daemon=True).start()
 
     print("Server running at http://0.0.0.0:5000")
