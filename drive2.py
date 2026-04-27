@@ -2,6 +2,8 @@ import cv2
 import time
 import board
 import busio
+import threading
+from flask import Flask, Response, render_template_string
 from adafruit_pca9685 import PCA9685
 from ultralytics import YOLO
 
@@ -11,6 +13,10 @@ CAMERA_WIDTH = 640
 CAMERA_HEIGHT = 480
 CENTER_X = CAMERA_WIDTH / 2
 
+# FLASK CONFIG
+HOST_IP = '0.0.0.0'
+HOST_PORT = 5000
+
 # --- TUNING ---
 ROI_VERTICAL_CUTOFF = 0.7
 Kp = 0.0007
@@ -19,6 +25,7 @@ BASE_SPEED = 0.12
 LANE_WIDTH_PIXELS = 450
 
 # STOP SIGN LOGIC
+STOP_DURATION = 2.0
 STOP_COOLDOWN = 5.0
 STOP_THRESHOLD_Y = CAMERA_HEIGHT * 0.8
 
@@ -26,6 +33,15 @@ STOP_THRESHOLD_Y = CAMERA_HEIGHT * 0.8
 MIN_MOTOR_POWER = 0.07
 MAX_STEER = 0.8
 
+# --- GLOBAL VARIABLES ---
+output_frame = None
+lock = threading.Lock()
+
+robot_enabled = False
+running = True
+
+# --- FLASK APP ---
+app = Flask(__name__)
 
 # --- Motor Class ---
 class Motor:
@@ -37,8 +53,11 @@ class Motor:
         if abs(speed) < 0.01:
             self.stop()
             return
-        mapped = MIN_MOTOR_POWER + (abs(speed) * (1.0 - MIN_MOTOR_POWER))
-        pwm = int(min(mapped, 1.0) * 65535)
+
+        abs_s = abs(speed)
+        mapped_speed = MIN_MOTOR_POWER + (abs_s * (1.0 - MIN_MOTOR_POWER))
+        pwm = int(min(mapped_speed, 1.0) * 65535)
+
         if speed > 0:
             self.in1.duty_cycle = pwm
             self.in2.duty_cycle = 0
@@ -51,91 +70,114 @@ class Motor:
         self.in2.duty_cycle = 0
 
 
-# --- MAIN ---
-def main():
-    robot_enabled = False
+# --- TERMINAL CONTROL THREAD ---
+def keyboard_listener(stop_callback):
+    global robot_enabled, running
 
-    # Init hardware
-    print("Initializing hardware...")
-    i2c = busio.I2C(board.SCL, board.SDA)
-    pca = PCA9685(i2c)
-    pca.frequency = 100
-    left_motors  = [Motor(pca, 0, 1), Motor(pca, 6, 7)]
-    right_motors = [Motor(pca, 2, 3), Motor(pca, 4, 5)]
+    print("\nPress ENTER to toggle robot ON/OFF")
+    print("Press Ctrl+C to quit\n")
+
+    while running:
+        try:
+            input()
+            robot_enabled = not robot_enabled
+            print(f"Robot {'STARTED' if robot_enabled else 'STOPPED'}")
+
+            if not robot_enabled:
+                stop_callback()
+
+        except EOFError:
+            break
+
+
+# --- ROBOT LOGIC THREAD ---
+def robot_control_loop():
+    global output_frame, lock, robot_enabled, running
+
+    try:
+        i2c = busio.I2C(board.SCL, board.SDA)
+        pca = PCA9685(i2c)
+        pca.frequency = 100
+        left_motors = [Motor(pca, 0, 1), Motor(pca, 6, 7)]
+        right_motors = [Motor(pca, 2, 3), Motor(pca, 4, 5)]
+    except Exception as e:
+        print(f"Hardware Init Error: {e}")
+        return
 
     def set_drive(fwd, steer):
         steer = max(min(steer, MAX_STEER), -MAX_STEER)
-        left  = fwd + steer
+        left = fwd + steer
         right = fwd - steer
-        mx = max(abs(left), abs(right))
-        if mx > 1.0:
-            left /= mx
-            right /= mx
-        for m in left_motors:  m.set_speed(left)
-        for m in right_motors: m.set_speed(right)
+
+        max_val = max(abs(left), abs(right))
+        if max_val > 1.0:
+            left /= max_val
+            right /= max_val
+
+        for m in left_motors:
+            m.set_speed(left)
+        for m in right_motors:
+            m.set_speed(right)
 
     def stop_all():
         for m in left_motors + right_motors:
             m.stop()
 
-    # Load model
-    print("Loading YOLO model...")
+    kb_thread = threading.Thread(target=keyboard_listener, args=(stop_all,), daemon=True)
+    kb_thread.start()
+
+    print("Loading YOLO Model...")
     model = YOLO(MODEL_PATH)
 
-    # Open camera
-    print("Opening camera...")
-    cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAMERA_WIDTH)
+    prev_error = 0
+    last_stop_time = 0
+
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
+
     if not cap.isOpened():
         raise RuntimeError("Cannot open camera")
 
-    prev_error     = 0
-    last_stop_time = 0
-
-    print("\n--- READY ---")
-    print("  SPACE  ->  start / stop robot")
-    print("  Q      ->  quit\n")
-
     try:
-        while True:
+        while running:
             ok, frame = cap.read()
             if not ok or frame is None:
                 continue
 
             frame = cv2.flip(frame, 1)
 
-            # --- KEYBOARD (1 ms poll) ---
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                print("Quitting...")
-                break
-            elif key == ord(' '):
-                robot_enabled = not robot_enabled
-                print(f"Robot {'STARTED' if robot_enabled else 'STOPPED'}")
-                if not robot_enabled:
-                    stop_all()
+            results = model.predict(source=frame, conf=0.4, imgsz=640, verbose=False)
+            result = results[0]
+            boxes = result.boxes
 
-            # --- HOLD if not enabled ---
+            annotated_frame = result.plot()
+
             if not robot_enabled:
-                display = frame.copy()
-                cv2.putText(display, "PRESS SPACE TO START",
-                            (60, CAMERA_HEIGHT // 2),
-                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
-                cv2.imshow("Robot", display)
+                stop_all()
+
+                cv2.putText(
+                    annotated_frame,
+                    "ROBOT DISABLED - PRESS ENTER",
+                    (40, 240),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.9,
+                    (0, 0, 255),
+                    2
+                )
+
+                with lock:
+                    output_frame = annotated_frame.copy()
+
                 continue
 
-            # --- INFERENCE ---
-            results = model.predict(source=frame, conf=0.4, imgsz=640, verbose=False)
-            result  = results[0]
-            boxes   = result.boxes
-
-            best_y_x   = None
-            best_w_x   = None
+            best_y_x = None
+            best_w_x = None
             max_y_area = 0
             max_w_area = 0
             stop_requested = False
-            current_time   = time.time()
+
+            current_time = time.time()
 
             for box in boxes:
                 cls = model.names[int(box.cls[0])]
@@ -150,6 +192,7 @@ def main():
                     continue
 
                 area = w * h
+
                 if cls == 'yellowline' and area > max_y_area:
                     max_y_area = area
                     best_y_x = x
@@ -158,9 +201,11 @@ def main():
                     best_w_x = x
 
             if stop_requested:
+                stop_all()
+                last_stop_time = current_time
+                time.sleep(STOP_DURATION)
                 continue
 
-            # --- TARGET & PD ---
             if best_y_x is not None and best_w_x is not None:
                 target_x = (best_y_x + best_w_x) / 2
             elif best_y_x is not None:
@@ -170,44 +215,78 @@ def main():
             else:
                 target_x = CENTER_X
 
-            error      = target_x - CENTER_X
+            error = target_x - CENTER_X
             derivative = error - prev_error
             prev_error = error
-            steering   = (error * Kp) + (derivative * Kd)
+            steering = (error * Kp) + (derivative * Kd)
 
             set_drive(BASE_SPEED, steering)
 
-            # --- DEBUG OVERLAY ---
-            annotated = result.plot()
-            debug_lines = [
-                f"best_w_x: {best_w_x}",
-                f"best_y_x: {best_y_x}",
-                f"target_x: {target_x:.1f}",
-                f"error:    {error:.1f}",
-                f"steering: {steering:.4f}",
-            ]
-            for i, line in enumerate(debug_lines):
-                ypos = 25 + i * 22
-                cv2.putText(annotated, line, (10, ypos),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(annotated, line, (10, ypos),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
-
-            debug_y = int(CAMERA_HEIGHT * ROI_VERTICAL_CUTOFF) + 20
-            cv2.circle(annotated, (int(target_x), debug_y), 10, (0, 255, 0), -1)
-            cv2.line(annotated, (int(CENTER_X), 0), (int(CENTER_X), CAMERA_HEIGHT),
-                     (255, 255, 255), 1)
-
-            cv2.imshow("Robot", annotated)
+            with lock:
+                output_frame = annotated_frame.copy()
 
     except KeyboardInterrupt:
-        print("\nCtrl+C -- stopping.")
+        print("Robot interrupted.")
+
     finally:
+        running = False
         stop_all()
         cap.release()
-        cv2.destroyAllWindows()
-        print("Motors stopped. Exited cleanly.")
+        print("Motors stopped safely.")
 
 
+# --- STREAMING ---
+def generate_frames():
+    global output_frame
+
+    while True:
+        with lock:
+            if output_frame is None:
+                continue
+
+            (flag, encodedImage) = cv2.imencode(".jpg", output_frame)
+
+            if not flag:
+                continue
+
+        yield (
+            b'--frame\r\n'
+            b'Content-Type: image/jpeg\r\n\r\n' +
+            bytearray(encodedImage) +
+            b'\r\n'
+        )
+
+        time.sleep(0.03)
+
+
+@app.route('/')
+def index():
+    return render_template_string("""
+    <html>
+    <body style="background:#111;color:#eee;text-align:center;font-family:monospace;">
+        <h1>RADXA ROBOT</h1>
+        <img src="{{ url_for('video_feed') }}" width="640" height="480">
+    </body>
+    </html>
+    """)
+
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(generate_frames(),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+
+# --- MAIN ---
 if __name__ == "__main__":
-    main()
+    t = threading.Thread(target=robot_control_loop, daemon=True)
+    t.start()
+
+    print(f"Web Server: http://{HOST_IP}:{HOST_PORT}")
+
+    try:
+        app.run(host=HOST_IP, port=HOST_PORT, debug=False,
+                threaded=True, use_reloader=False)
+    except KeyboardInterrupt:
+        running = False
+        print("Stopping...")
